@@ -1,0 +1,38 @@
+# 整合所有配置
+video:
+  window_name: 'Video Frame Extractor'
+  default_wait: 1
+  controls:
+    play_pause: 'p'
+    save_frame: 's'
+    prev_frame: 'l'
+    next_frame: 'k'
+    quit: 'q'
+    fast_forward: 'f'
+    rewind: 'r'
+
+paths:
+  frames_base: '/home/burnling/图片/frames'
+  rois_output: 'rois'
+  output_detect: 'output_detect'
+  output_keypoint: 'output_keypoint'
+  labels_detect: 'labels_detect'
+  labels_keypoint: 'labels_keypoint'
+
+dataset:
+  train_ratio: 0.8
+  exclude_videos: ['1', 'output']
+
+detection:
+  labels:
+    R_logo: 0
+    Unhitted: 1
+    Hitted: 2
+
+keypoint:
+  num_classes: 1
+  default_bbox: [0.5, 0.5, 1.0, 1.0]
+
+roi:
+  min_size: 10
+  padding: 0
