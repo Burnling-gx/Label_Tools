@@ -17,6 +17,7 @@ class BBox:
     width: int
     height: int
     label: str
+    _id: str
     
     @property
     def x2(self) -> int:
@@ -48,7 +49,7 @@ class ROICutter:
         self.rois_path = self.base_path / self.config['paths']['rois_output']
         self.rois_path.mkdir(exist_ok=True)
         
-    def parse_bbox(self, label_data: dict, img_shape: Tuple[int, int]) -> BBox:
+    def parse_bbox(self, label_data: dict, _id: str) -> BBox:
         """解析标注数据为边界框"""
         orig_w = label_data['original_width']
         orig_h = label_data['original_height']
@@ -65,16 +66,18 @@ class ROICutter:
             y = max(0, y - padding)
             w = min(orig_w - x, w + 2 * padding)
             h = min(orig_h - y, h + 2 * padding)
-            
-        return BBox(x, y, w, h, label_data['rectanglelabels'][0])
+        
+
+        return BBox(x, y, w, h, label_data['rectanglelabels'][0], _id)
     
     def process_image(self, image_data: dict) -> None:
         """处理单张图片的ROI提取"""
         # 构建图片路径
         img_rel_path = image_data['image'][21:]
+        img_rel_path = img_rel_path.replace(r'%E5%9B%BE%E7%89%87', '图片')
         video_name = Path(img_rel_path).stem.split('_')[0]
         img_path = self.frames_path / video_name / Path(img_rel_path).name
-        
+
         # 读取图片
         img = cv2.imread(str(img_path))
         if img is None:
@@ -85,8 +88,8 @@ class ROICutter:
             return
             
         # 处理每个ROI区域
-        for label in image_data['label']:
-            bbox = self.parse_bbox(label, img.shape)
+        for index, label in enumerate(image_data['label']):
+            bbox = self.parse_bbox(label, index + 1)
             
             # 验证边界框
             if not bbox.is_valid(img.shape, self.config['roi'].get('min_size', 10)):
@@ -97,16 +100,15 @@ class ROICutter:
             roi = img[bbox.y:bbox.y2, bbox.x:bbox.x2]
             
             # 生成输出文件名
-            output_name = f"{Path(img_rel_path).stem}-{bbox.label}-{bbox.x}_{bbox.y}.jpg"
+            output_name = f"{Path(img_rel_path).stem}-{bbox.label}-{bbox.x}_{bbox.y}-{bbox._id}.jpg"
             output_path = self.rois_path / output_name
             
             # 保存ROI
             cv2.imwrite(str(output_path), roi)
     
-    def process_all(self):
+    def process_all(self, json_path):
         """处理所有图片"""
         # 加载标注文件
-        json_path = self.base_path / 'label_detect.json'
         try:
             with open(json_path) as f:
                 images = json.load(f)

@@ -74,11 +74,11 @@ class DatasetGenerator:
             for box in anno.boxes:
                 f.write(f"{box}\n")
     
-    def create_dataset(self):
+    def create_dataset(self, jsonpath):
         """生成数据集"""
         with self.create_temp_dirs():
             # 加载并处理标注
-            with open(self.base_path / 'label_detect.json') as f:
+            with open(jsonpath) as f:
                 labels_data = json.load(f)
             
             console.print("Processing annotations...", style="bold green")

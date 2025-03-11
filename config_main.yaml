@@ -25,9 +25,7 @@ dataset:
 
 detection:
   labels:
-    R_logo: 0
-    Unhitted: 1
-    Hitted: 2
+    Unhitted: 0
 
 keypoint:
   num_classes: 1

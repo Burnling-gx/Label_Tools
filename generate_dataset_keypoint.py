@@ -21,42 +21,32 @@ class Keypoint:
     
     def __str__(self):
         return f"{self.x} {self.y}"
-        
-    def angle_from_center(self, center_x: float, center_y: float) -> float:
-        """计算关键点相对于中心点的角度"""
-        dx = self.x - center_x
-        dy = self.y - center_y
-        angle = math.atan2(dy, dx)
-        # 将角度转换到 [0, 2π] 范围
-        return angle if angle >= 0 else angle + 2 * math.pi
+
+@dataclass
+class BoundingBox:
+    cls: int
+    x: float
+    y: float
+    w: float
+    h: float
+    
+    def __str__(self):
+        return f"{self.cls} {self.x} {self.y} {self.w} {self.h}"
+
+@dataclass
+class ImageAnnotation:
+    image_path: Path
+    boxes: List[BoundingBox]
+    image_shape: List[int]
 
 @dataclass
 class KeypointAnnotation:
     image_path: Path
     keypoints: List[Keypoint]
-    bbox: List[float]
-    cls: int = 0
-    
-    def sort_keypoints_by_angle(self) -> None:
-        """按照向量角度排序关键点"""
-        if not self.keypoints:
-            return
-            
-        # 计算中心点
-        center_x = sum(kp.x for kp in self.keypoints) / len(self.keypoints)
-        center_y = sum(kp.y for kp in self.keypoints) / len(self.keypoints)
-        
-        # 根据角度排序
-        self.keypoints.sort(
-            key=lambda kp: kp.angle_from_center(center_x, center_y)
-        )
-    
+    bbox: BoundingBox
+
     def __str__(self):
-        # 先排序再转字符串
-        self.sort_keypoints_by_angle()
-        kps_str = " ".join(str(kp) for kp in self.keypoints)
-        bbox_str = " ".join(map(str, self.bbox))
-        return f"{self.cls} {bbox_str} {kps_str}"
+        return f"{self.bbox} {' '.join(map(str, self.keypoints))}"
 
 class KeypointDatasetGenerator:
     def __init__(self, config_path: Path):
@@ -67,6 +57,7 @@ class KeypointDatasetGenerator:
         self.rois_path = self.base_path / self.config['paths']['rois_output']
         self.labels_path = self.base_path / self.config['paths']['labels_keypoint']
         self.output_path = self.base_path / self.config['paths']['output_keypoint']
+        self.frames_path = Path(self.config['paths']['frames_base'])
         
     @contextmanager
     def create_temp_dirs(self):
@@ -79,54 +70,129 @@ class KeypointDatasetGenerator:
             yield
         finally:
             shutil.rmtree(self.labels_path, ignore_errors=True)
+            shutil.rmtree(self.output_path, ignore_errors=True)
             
-    def process_annotation(self, image_data: dict) -> KeypointAnnotation:
+    def process_annotation_keypoints(self, image_data: dict) -> KeypointAnnotation:
         """处理单个图像的关键点标注"""
         image_path = Path(image_data['img'][21:])
+        frame_name = image_path.stem.split('-')[0]
+
         keypoints = []
-        
+
         if kps := image_data.get('kp-1'):
+            if len(kps) != 4:
+                raise ValueError("Invalid number of keypoints")
+            # kps = [(label, x_pix, y_pix]
+            kps = [(kp['keypointlabels'][0], kp['x']*kp['original_width']/100, kp['y']*kp['original_height']/100) for kp in kps]
+            # print(kps)
+            # Check that all required keypoints are present exactly once
+            keypoint_counts = {"kp1": 0, "kp2": 0, "kp3": 0, "kp4": 0}
             for kp in kps:
-                x = kp['x'] / 100
-                y = kp['y'] / 100
-                keypoints.append(Keypoint(x, y))
-                        
+                label = kp[0]
+                if label in keypoint_counts:
+                    keypoint_counts[label] += 1
+                else:
+                    raise ValueError(f"Unknown keypoint label: {label}, image: {frame_name}")
+
+            for label, count in keypoint_counts.items():
+                if count != 1:
+                    raise ValueError(f"Expected 1 {label}, found {count}, image: {frame_name}")
+
+            # Convert to dict for easier access
+            keypoints_dict = {kp[0]: {"x": kp[1], "y": -kp[2]} for kp in kps}
+
+            # Compute center point
+            center_x = sum(kp[1] for kp in kps) / len(kps)
+            center_y = sum(kp[2] for kp in kps) / len(kps)
+
+            # Calculate angles for each keypoint
+            for kp in kps:
+                label, x, y = kp[0], kp[1], kp[2]
+                dx = x - center_x
+                dy = y - center_y
+                angle = math.atan2(dx, dy)
+                # Convert to [0, 2π]
+                angle = angle if angle >= 0 else angle + 2 * math.pi
+                keypoints_dict[label]["angle"] = angle
+            
+            # print(keypoints_dict)
+            # Check if points are in counterclockwise order: kp1, kp2, kp3, kp4
+            expected_order = ["kp1", "kp2", "kp3", "kp4"]
+            sorted_kps = sorted(expected_order, key=lambda k: keypoints_dict[k]["angle"])
+            if ''.join(expected_order) not in ''.join(sorted_kps)*2:
+                raise ValueError(f"Keypoints not in counterclockwise order. Found: {sorted_kps}, image: {frame_name}")
+
+            for kp in kps:
+                keypoints.append(Keypoint(kp[1], kp[2]))
+        
         anno = KeypointAnnotation(
             image_path=image_path,
             keypoints=keypoints,
-            bbox=self.config['keypoint']['default_bbox'],
-            cls=0
+            bbox=None
         )
         
         return anno
     
-    def write_annotation(self, anno: KeypointAnnotation):
+    def write_annotation(self, anno: List[KeypointAnnotation]):
         """写入标注文件"""
-        if not anno.keypoints:
+        # print(anno)
+        if not anno:
             return
-            
-        label_file = self.labels_path / f"{anno.image_path.stem}.txt"
+        frame_name = anno[0].image_path.stem.split('-')[0]
+        label_file = self.labels_path / f"{frame_name}.txt"
         with open(label_file, 'w') as f:
-            f.write(f"{anno}\n")
+            for single_anno in anno:
+                f.write(str(single_anno))
+                f.write('\n')
+                # print(single_anno)
+
+    def process_annotation_detect(self, image_data: dict) -> ImageAnnotation:
+        """处理单个图像标注数据"""
+        image_path = Path(image_data['image'][21:])
+        image_shape = [1080, 1440]
+        boxes = []
+
+        if labels := image_data.get('label'):
+            for label in labels:
+                cls = self.config['detection']['labels'][label['rectanglelabels'][0]]
+                x = label['x'] / 100 + label['width'] / 200
+                y = label['y'] / 100 + label['height'] / 200
+                w = label['width'] / 100
+                h = label['height'] / 100
+                boxes.append(BoundingBox(cls, x, y, w, h))
+                
+        return ImageAnnotation(image_path, boxes, image_shape)
     
-    def resize_image(self, image_path: Path, output_path: Path):
-        """将图片缩放至 128x128 并保存"""
-        image = cv2.imread(str(image_path))
-        resized_image = cv2.resize(image, (128, 128))
-        cv2.imwrite(str(output_path), resized_image)
-    
-    def create_dataset(self):
+    def create_dataset(self, json_path, json_path2):
         """生成数据集"""
         with self.create_temp_dirs():
             # 加载并处理标注
-            with open(self.base_path / 'label_keypoint.json') as f:
+            with open(json_path) as f:
                 labels_data = json.load(f)
+            with open(json_path2) as f:
+                labels_data_kp = json.load(f)
             
             console.print("Processing annotations...", style="bold green")
-            annotations = [self.process_annotation(img) for img in track(labels_data)]
+
+            self.annotations_detect = {Path(img['image'][21:]).stem.split('-')[0] : self.process_annotation_detect(img) for img in track(labels_data)}
+            annotations = {}
+            
+            for img in track(labels_data_kp):
+                frame_name = Path(img['img'][21:]).stem.split('-')[0]
+                frame_id = int(Path(img['img'][21:]).stem.split('-')[-1]) - 1
+                bbox = self.annotations_detect[frame_name].boxes[frame_id] # xywhn
+                anno = self.process_annotation_keypoints(img) # xy
+                anno_kp = [Keypoint((kp.x+(bbox.x-bbox.w/2)*1440)/1440, (kp.y+(bbox.y-bbox.h/2)*1080)/1080) for kp in anno.keypoints]
+                anno.keypoints = anno_kp
+                anno.bbox = self.annotations_detect[frame_name].boxes[frame_id]
+                if frame_name not in annotations:
+                    annotations[frame_name] = list()
+
+                annotations[frame_name].append(anno)
+                
             
             for anno in annotations:
-                self.write_annotation(anno)
+                self.write_annotation(annotations[anno])
             
             # 收集数据集
             datasets = []
@@ -135,10 +201,13 @@ class KeypointDatasetGenerator:
             for label_file in self.labels_path.glob('*.txt'):
                 if label_file.stem.split('_')[0] in exclude_videos:
                     continue
-                    
-                image_file = self.rois_path / f"{label_file.stem}.jpg"
+                video_name = label_file.stem.split('_')[0]
+                image_file = self.frames_path / video_name / f"{label_file.stem}.jpg"
+                # print(label_file, image_file)
                 if image_file.exists():
                     datasets.append((image_file, label_file))
+
+            # print(datasets)
             
             # 分割数据集
             random.shuffle(datasets)
@@ -152,8 +221,9 @@ class KeypointDatasetGenerator:
                 output_dir = self.output_path / dir_name
                 for image_file, label_file in track(dataset):
                     resized_image_path = output_dir / image_file.name
-                    self.resize_image(image_file, resized_image_path)
+                    # self.resize_image(image_file, resized_image_path)
                     shutil.copy(label_file, output_dir)
+                    shutil.copy(image_file, output_dir)
             
             # 打包数据集
             console.print("Creating zip archive...", style="bold green")
